@@ -2,13 +2,13 @@
 
 ## 1. Agentic Fit
 
-| Tiêu chí | Điểm | Lý do |
-|---|:---:|---|
-| Multi-step Reasoning | 5/5 | Phải lấy JD, chấm điểm, xếp hạng rồi tìm slot. |
-| Tool Interaction | 5/5 | Cần đọc hồ sơ/JD/lịch và thực hiện booking có kiểm soát. |
-| Dynamic Decision | 5/5 | Lỗi hồ sơ, slot bận và trạng thái phê duyệt làm đổi nhánh xử lý. |
-| Long Horizon | 4/5 | Pipeline từ tiếp nhận CV đến lịch phỏng vấn gồm nhiều trạng thái. |
-| **Tổng** | **19/20** | **Rất phù hợp với ReAct Agent; câu hỏi chính sách vẫn nên đi Chatbot path.** |
+| Tiêu chí             |   Điểm    | Lý do                                                                        |
+| -------------------- | :-------: | ---------------------------------------------------------------------------- |
+| Multi-step Reasoning |    5/5    | Phải lấy JD, chấm điểm, xếp hạng rồi tìm slot.                               |
+| Tool Interaction     |    5/5    | Cần đọc hồ sơ/JD/lịch và thực hiện booking có kiểm soát.                     |
+| Dynamic Decision     |    5/5    | Lỗi hồ sơ, slot bận và trạng thái phê duyệt làm đổi nhánh xử lý.             |
+| Long Horizon         |    4/5    | Pipeline từ tiếp nhận CV đến lịch phỏng vấn gồm nhiều trạng thái.            |
+| **Tổng**             | **19/20** | **Rất phù hợp với ReAct Agent; câu hỏi chính sách vẫn nên đi Chatbot path.** |
 
 ## 2. Scoring MVP
 
@@ -55,13 +55,13 @@ Final Answer: Không thể hoàn tất: Cần HR phê duyệt trước khi đặ
 
 ## 5. Đánh giá 5 test cases
 
-| # | Kết quả | Tool path / Guardrail |
-|---|---|---|
-| 1 | Pass | Chatbot trả chính sách, 0 tool call |
-| 2 | Pass | `score_candidate`, có evidence |
-| 3 | Pass | `rank_candidates` → `find_interview_slots` |
-| 4 | Pass | Chặn booking vì thiếu phê duyệt |
-| 5 | Pass | `CANDIDATE_NOT_FOUND`, dừng an toàn |
+| #   | Kết quả | Tool path / Guardrail                      |
+| --- | ------- | ------------------------------------------ |
+| 1   | Pass    | Chatbot trả chính sách, 0 tool call        |
+| 2   | Pass    | `score_candidate`, có evidence             |
+| 3   | Pass    | `rank_candidates` → `find_interview_slots` |
+| 4   | Pass    | Chặn booking vì thiếu phê duyệt            |
+| 5   | Pass    | `CANDIDATE_NOT_FOUND`, dừng an toàn        |
 
 ## 6. Giới hạn MVP
 

@@ -3,7 +3,7 @@
     "id": 1,
     "category": "simple",
     "question": "Điểm phù hợp của hệ thống có thay thế quyết định của HR không?",
-    "expected_behavior": "Trả lời trực tiếp: điểm chỉ là gợi ý, HR quyết định cuối."
+    "expected_behavior": "Trả lời trực tiếp: điểm chỉ là gợi ý,HR quyết định cuối."
   },
   {
     "id": 2,

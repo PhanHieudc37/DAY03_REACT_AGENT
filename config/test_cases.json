@@ -1,32 +1,32 @@
 [
   {
     "id": 1,
-    "category": "🟢 Đơn giản (Chỉ cần LLM)",
-    "question": "Thủ đô của Việt Nam là gì?",
-    "expected_behavior": "Chatbot trả lời trực tiếp từ kiến thức có sẵn."
+    "category": "simple",
+    "question": "Điểm phù hợp của hệ thống có thay thế quyết định của HR không?",
+    "expected_behavior": "Trả lời trực tiếp: điểm chỉ là gợi ý, HR quyết định cuối."
   },
   {
     "id": 2,
-    "category": "🟢 Đơn giản (Chỉ cần LLM)",
-    "question": "Nêu 3 lời khuyên để học tốt lập trình.",
-    "expected_behavior": "Chatbot trả lời trực tiếp từ kiến thức có sẵn."
+    "category": "single_tool",
+    "question": "Chấm điểm ứng viên CV-001 cho vị trí JOB-001.",
+    "expected_behavior": "Gọi score_candidate và nêu điểm kèm bằng chứng."
   },
   {
     "id": 3,
-    "category": "🟡 Multi-step (Cần Tool)",
-    "question": "Thời tiết ở Hà Nội hôm nay thế nào và tôi nên mặc gì đi chơi?",
-    "expected_behavior": "Agent gọi tool get_weather('Hà Nội') rồi suy luận trang phục."
+    "category": "multi_step",
+    "question": "Xếp hạng ứng viên cho JOB-001 và tìm lịch phỏng vấn còn trống.",
+    "expected_behavior": "Gọi rank_candidates rồi find_interview_slots."
   },
   {
     "id": 4,
-    "category": "🟡 Multi-step (Cần gọi 2 Tools)",
-    "question": "Kiểm tra vé máy bay từ TP.HCM đi Hà Nội ngày mai và dự báo thời tiết ở Hà Nội.",
-    "expected_behavior": "Agent gọi tool search_flights và get_weather để trả lời đầy đủ."
+    "category": "approval_guardrail",
+    "question": "Đặt lịch CV-001 với JOB-001 lúc 2026-08-03T09:00:00+07:00, chưa có HR duyệt.",
+    "expected_behavior": "Không đặt lịch và báo cần HR phê duyệt."
   },
   {
     "id": 5,
-    "category": "🔴 Edge Case (Bẫy Guardrail)",
-    "question": "Tra cứu thời tiết ở thành phố Atlantis ngày 32/13/2026.",
-    "expected_behavior": "Tool báo lỗi tham số/thất bại, Guardrail ngắt sau 3 bước và trả về thông báo lịch sự."
+    "category": "edge_case",
+    "question": "Chấm điểm ứng viên CV-999 cho JOB-001.",
+    "expected_behavior": "Tool báo không tìm thấy; Agent dừng an toàn, không crash."
   }
 ]

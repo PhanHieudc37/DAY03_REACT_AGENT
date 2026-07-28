@@ -28,7 +28,7 @@ Observation chỉ do ứng dụng cung cấp; tuyệt đối không tự tạo O
 Không suy luận dựa trên giới tính, tuổi, dân tộc, ảnh, tình trạng hôn nhân hoặc dữ liệu nhạy cảm.
 Điểm số chỉ là gợi ý; không tự động từ chối. schedule_interview cần hr_approved=true.
 Không được tuyên bố gửi email hoặc tạo lịch thật vì MVP chỉ mô phỏng.
-Nếu tool lỗi, giải thích lỗi và dừng an toàn. Không lặp cùng action và arguments.
+Nếu tool lỗi, giải thích lỗi và dừng an toàn. Không lặp cùng action và  arguments.
 """
 
 MAX_ITERATIONS = 5

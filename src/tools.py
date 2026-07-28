@@ -333,37 +333,97 @@ def rank_candidates(job_id: str) -> dict[str, Any]:
 
 
 def find_interview_slots(job_id: str) -> dict[str, Any]:
-    """Trả các slot còn trống. Read-only, không tạo event lịch thật."""
-    if not get_job(job_id).get("ok"):
-        return get_job(job_id)
-    booked = {booking["scheduled_time"] for booking in BOOKINGS}
-    slots = [slot for slot in INTERVIEW_SLOTS.get(job_id.upper(), []) if slot not in booked]
-    return {"ok": True, "job_id": job_id.upper(), "timezone": "Asia/Ho_Chi_Minh", "slots": slots}
+    """Trả các slot phỏng vấn còn trống của một vị trí.
+
+    Args:
+        job_id: Mã vị trí cần tìm lịch.
+
+    Returns:
+        Danh sách slot ISO 8601 đã sắp xếp, hoặc lỗi từ ``get_job``.
+
+    Side effects:
+        Không có; tool không tạo sự kiện lịch.
+    """
+    job = get_job(job_id)
+    if not job.get("ok"):
+        return job
+    booked = {
+        booking["scheduled_time"]
+        for booking in BOOKINGS
+        if booking["job_id"] == job["id"]
+    }
+    slots = sorted(
+        slot for slot in INTERVIEW_SLOTS.get(job["id"], []) if slot not in booked
+    )
+    return {
+        "ok": True,
+        "job_id": job["id"],
+        "timezone": "Asia/Ho_Chi_Minh",
+        "slots": slots,
+    }
 
 
 def schedule_interview(
     candidate_id: str, job_id: str, scheduled_time: str, hr_approved: bool = False
 ) -> dict[str, Any]:
-    """Đặt lịch mô phỏng; bắt buộc HR phê duyệt và slot phải còn trống.
+    """Đặt lịch phỏng vấn mô phỏng sau khi HR xác nhận rõ ràng.
 
-    Side effect chỉ nằm trong bộ nhớ của tiến trình hiện tại, không gửi email/calendar.
+    Args:
+        candidate_id: Mã ứng viên.
+        job_id: Mã vị trí.
+        scheduled_time: Slot theo định dạng ISO 8601 và phải có múi giờ.
+        hr_approved: Chỉ giá trị boolean ``True`` mới được chấp nhận.
+
+    Returns:
+        Booking demo khi thành công; nếu thất bại trả lỗi có cấu trúc như
+        ``HR_APPROVAL_REQUIRED``, ``INVALID_DATETIME``, ``ALREADY_SCHEDULED``
+        hoặc ``SLOT_UNAVAILABLE``.
+
+    Side effects:
+        Thêm một booking vào bộ nhớ tiến trình; không gửi email/calendar thật.
     """
-    if not hr_approved:
+    if hr_approved is not True:
         return _error("HR_APPROVAL_REQUIRED", "Cần HR phê duyệt trước khi đặt lịch.")
-    if not get_candidate(candidate_id).get("ok"):
-        return get_candidate(candidate_id)
-    slots = find_interview_slots(job_id)
+
+    candidate = get_candidate(candidate_id)
+    if not candidate.get("ok"):
+        return candidate
+    job = get_job(job_id)
+    if not job.get("ok"):
+        return job
+
+    if not isinstance(scheduled_time, str):
+        return _error("INVALID_DATETIME", "Thời gian phải là chuỗi ISO 8601.")
+    try:
+        parsed_time = datetime.fromisoformat(scheduled_time)
+    except ValueError:
+        return _error("INVALID_DATETIME", "Thời gian phải ở định dạng ISO 8601.")
+    if parsed_time.tzinfo is None:
+        return _error("INVALID_DATETIME", "Thời gian phải bao gồm múi giờ.")
+
+    for booking in BOOKINGS:
+        if (
+            booking["candidate_id"] == candidate["id"]
+            and booking["job_id"] == job["id"]
+            and booking["scheduled_time"] == scheduled_time
+        ):
+            return _error(
+                "ALREADY_SCHEDULED",
+                "Ứng viên đã có đúng lịch phỏng vấn này.",
+                booking=deepcopy(booking),
+            )
+
+    slots = find_interview_slots(job["id"])
     if not slots.get("ok"):
         return slots
-    try:
-        datetime.fromisoformat(scheduled_time)
-    except (TypeError, ValueError):
-        return _error("INVALID_DATETIME", "Thời gian phải ở định dạng ISO 8601.")
     if scheduled_time not in slots["slots"]:
         return _error("SLOT_UNAVAILABLE", "Slot không tồn tại hoặc đã được đặt.")
     booking = {
-        "candidate_id": candidate_id.upper(), "job_id": job_id.upper(),
-        "scheduled_time": scheduled_time, "status": "scheduled_demo",
+        "booking_id": f"BOOKING-{len(BOOKINGS) + 1:03d}",
+        "candidate_id": candidate["id"],
+        "job_id": job["id"],
+        "scheduled_time": scheduled_time,
+        "status": "scheduled_demo",
     }
     BOOKINGS.append(booking)
     return {

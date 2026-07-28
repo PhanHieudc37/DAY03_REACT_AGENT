@@ -7,6 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from gridfs import GridFS
 from pymongo import ASCENDING, MongoClient
 import requests
+import re
 
 app=FastAPI(title="RecruitFlow Mongo API",version="1.0.0")
 app.add_middleware(CORSMiddleware,allow_origins=["http://localhost:3000","http://localhost:3001","http://localhost:3002"],allow_methods=["*"],allow_headers=["*"])
@@ -60,9 +61,19 @@ def validate_criteria(c):
     c["job_id"]=c.get("job_id") or f"job_{uuid.uuid4().hex[:8]}";c["updated_at"]=now()
     return c
 def score(candidate,c):
-    skills={x.lower() for x in candidate.get("skills",[])};must=[x.lower() for x in c["must_have_skills"]];nice=[x.lower() for x in c.get("nice_to_have_skills",[])]
-    matched=[x for x in must if x in skills];missing=[x for x in must if x not in skills];matched_nice=[x for x in nice if x in skills]
-    ss=round(80*len(matched)/max(len(must),1)+20*len(matched_nice)/max(len(nice),1),1)
+    def norm(value):return re.sub(r"[^a-z0-9+#.]+"," ",str(value).lower()).strip()
+    evidence=[]
+    evidence.extend(candidate.get("skills",[]));evidence.extend(candidate.get("experience_domains",[]));evidence.extend(candidate.get("certifications",[]))
+    for item in candidate.get("work_history",[]):evidence.extend([item.get("company",""),item.get("role",""),item.get("duration","")])
+    for item in candidate.get("education",[]):evidence.extend([item.get("degree",""),item.get("school",""),item.get("major","")])
+    searchable=" | ".join(norm(x) for x in evidence if x)
+    aliases={"sql":["sql","mysql","postgresql","mssql","sql server","oracle database"],"fpt":["fpt","fpt software"]}
+    def has(term):
+        target=norm(term);variants=aliases.get(target,[target])
+        return any(re.search(rf"(?<![a-z0-9]){re.escape(norm(v))}(?![a-z0-9])",searchable) for v in variants)
+    must=[norm(x) for x in c["must_have_skills"]];nice=[norm(x) for x in c.get("nice_to_have_skills",[])]
+    matched=[x for x in must if has(x)];missing=[x for x in must if not has(x)];matched_nice=[x for x in nice if has(x)]
+    ss=round((80*len(matched)/max(len(must),1)+20*len(matched_nice)/max(len(nice),1)) if nice else (100*len(matched)/max(len(must),1)),1)
     ideal=max(float(c.get("ideal_experience_years") or c["min_experience_years"]),1);es=min(100,round(float(candidate.get("experience_years",0))/ideal*100))
     levels={"high_school":1,"college":2,"bachelor":3,"master":4,"phd":5};cl=max([levels.get(x.get("degree",""),0) for x in candidate.get("education",[])]+[0]);need=levels.get(c["min_education"],1);eds=100 if cl>=need else round(cl/need*100)
     certs={x.lower() for x in candidate.get("certifications",[])};required_certs=[x.lower() for x in c.get("required_certifications",[])];cert_ratio=len([x for x in required_certs if x in certs])/max(len(required_certs),1) if required_certs else 1
@@ -93,7 +104,7 @@ def send_booking_email(to_email,candidate_name,job_title,invite):
         with smtplib.SMTP(host,port,timeout=30) as server:server.ehlo();server.starttls(context=ssl.create_default_context());server.login(os.environ["MAIL_USER"],os.environ["MAIL_PASS"]);server.send_message(msg)
 @app.on_event("startup")
 def setup():
-    db.jobs.create_index([("job_id",ASCENDING)],unique=True);db.candidates.create_index([("candidate_id",ASCENDING)],unique=True);db.applications.create_index([("application_id",ASCENDING)],unique=True);db.interviews.create_index([("interview_id",ASCENDING)],unique=True);db.interview_invites.create_index([("invite_id",ASCENDING)],unique=True);db.agent_pending_actions.create_index([("confirmation_id",ASCENDING)],unique=True);db.agent_audit_logs.create_index([("created_at",ASCENDING)])
+    db.jobs.create_index([("job_id",ASCENDING)],unique=True);db.candidates.create_index([("candidate_id",ASCENDING)],unique=True);db.applications.create_index([("application_id",ASCENDING)],unique=True);db.interviews.create_index([("interview_id",ASCENDING)],unique=True);db.interview_invites.create_index([("invite_id",ASCENDING)],unique=True);db.agent_pending_actions.create_index([("confirmation_id",ASCENDING)],unique=True);db.agent_audit_logs.create_index([("created_at",ASCENDING)]);db.chat_sessions.create_index([("session_id",ASCENDING)],unique=True);db.chat_sessions.create_index([("updated_at",ASCENDING)])
 @app.get("/health")
 def health():client.admin.command("ping");return {"ok":True,"database":"mongodb","collections":db.list_collection_names()}
 @app.get("/ai-settings/gemini")
@@ -199,6 +210,52 @@ def agent_tools(payload:dict):
 def agent_audits(session_id:str=""):
     query={"session_id":session_id} if session_id else {}
     return {"ok":True,"logs":[clean(x) for x in db.agent_audit_logs.find(query).sort("created_at",-1).limit(200)]}
+
+@app.get("/chat-sessions")
+def list_chat_sessions():
+    projection={"_id":0,"session_id":1,"title":1,"preview":1,"message_count":1,"created_at":1,"updated_at":1}
+    return {"ok":True,"sessions":[clean(x) for x in db.chat_sessions.find({},projection).sort("updated_at",-1).limit(100)]}
+
+@app.get("/chat-sessions/{session_id}")
+def get_chat_session(session_id:str):
+    session=db.chat_sessions.find_one({"session_id":session_id})
+    if not session:raise HTTPException(404,"Không tìm thấy cuộc hội thoại.")
+    return {"ok":True,"session":clean(session)}
+
+@app.post("/chat-sessions/{session_id}/messages")
+def save_chat_message(session_id:str,payload:dict):
+    role=str(payload.get("role") or "")
+    text=str(payload.get("text") or "").strip()
+    if role not in ["user","agent"] or not text:raise HTTPException(400,"Tin nhắn không hợp lệ.")
+    created=now()
+    message={
+        "message_id":f"msg_{uuid.uuid4().hex[:12]}",
+        "role":role,
+        "text":text[:20000],
+        "created_at":created,
+    }
+    for field in ["attachments","trace","cvResults","criteria","result"]:
+        if payload.get(field) is not None:message[field]=payload[field]
+    title=(text[:70] if role=="user" else "Cuộc hội thoại mới")
+    db.chat_sessions.update_one(
+        {"session_id":session_id},
+        {
+            "$set":{"updated_at":created,"preview":text[:120]},
+            "$setOnInsert":{"session_id":session_id,"title":title,"created_at":created},
+            "$push":{"messages":{"$each":[message],"$slice":-500}},
+            "$inc":{"message_count":1},
+        },
+        upsert=True,
+    )
+    return {"ok":True,"message":{**message,"created_at":created.isoformat()}}
+
+@app.delete("/chat-sessions/{session_id}")
+def delete_chat_session(session_id:str):
+    result=db.chat_sessions.delete_one({"session_id":session_id})
+    db.agent_audit_logs.delete_many({"session_id":session_id})
+    db.agent_pending_actions.delete_many({"session_id":session_id,"status":"pending"})
+    if not result.deleted_count:raise HTTPException(404,"Không tìm thấy cuộc hội thoại.")
+    return {"ok":True,"deleted_session_id":session_id}
 @app.post("/jobs")
 def save_job(payload:dict):
     c=validate_criteria(payload);db.jobs.update_one({"job_id":c["job_id"]},{"$set":c},upsert=True);return {"ok":True,"criteria":clean(db.jobs.find_one({"job_id":c["job_id"]}))}
@@ -209,8 +266,9 @@ def delete_job(job_id:str):
     if not result.deleted_count:raise HTTPException(404,"Không tìm thấy vị trí.")
     return {"ok":True,"deleted_job_id":job_id}
 @app.post("/applications")
-async def application(file:UploadFile=File(...),criteria:str=Form(...),cover_letter:str=Form(""),expected_salary:str=Form(""),available_date:str=Form(""),screening_answer:str=Form("")):
-    c=validate_criteria(json.loads(criteria));db.jobs.update_one({"job_id":c["job_id"]},{"$set":c},upsert=True)
+async def application(file:UploadFile=File(...),criteria:str=Form(...),cover_letter:str=Form(""),expected_salary:str=Form(""),available_date:str=Form(""),screening_answer:str=Form(""),persist_criteria:str=Form("true")):
+    c=validate_criteria(json.loads(criteria))
+    if persist_criteria.lower() in ["1","true","yes"]:db.jobs.update_one({"job_id":c["job_id"]},{"$set":c},upsert=True)
     content=await file.read()
     if len(content)>10*1024*1024:raise HTTPException(413,"CV vượt quá 10 MB.")
     extra={"cover_letter":cover_letter,"expected_salary":expected_salary,"available_date":available_date,"screening_answer":screening_answer}
@@ -218,7 +276,7 @@ async def application(file:UploadFile=File(...),criteria:str=Form(...),cover_let
         file_id=fs.put(data,filename=filename,content_type=mime,uploaded_at=now())
         try:
             cand=parse_cv(data,mime,extra);cand.update({"candidate_id":f"cand_{uuid.uuid4().hex[:8]}","cv_file_id":str(file_id),"cv_filename":filename,"created_at":now()});db.candidates.insert_one(cand)
-            matching=score(cand,c);app_id=f"app_{uuid.uuid4().hex[:8]}";application={"application_id":app_id,"candidate_id":cand["candidate_id"],"job_id":c["job_id"],**matching,"hr_approved":False,"created_at":now()};db.applications.insert_one(application)
+            matching=score(cand,c);app_id=f"app_{uuid.uuid4().hex[:8]}";application={"application_id":app_id,"candidate_id":cand["candidate_id"],"job_id":c["job_id"],"criteria_snapshot":{k:v for k,v in c.items() if k not in ["_id","updated_at"]},**matching,"hr_approved":False,"created_at":now()};db.applications.insert_one(application)
             return clean(cand),clean(application)
         except Exception:
             fs.delete(file_id)

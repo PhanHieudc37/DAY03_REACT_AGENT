@@ -1,5 +1,5 @@
 "use client";
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 
 type Tab = "pipeline" | "criteria" | "cv" | "interview" | "assistant";
 type BatchItem = {
@@ -1860,9 +1860,12 @@ function Assistant({ jobs }: { jobs: any[] }) {
   const [geminiKeyCount, setGeminiKeyCount] = useState(0);
   const [keyStatus, setKeyStatus] = useState("");
   const [keySaving, setKeySaving] = useState(false);
-  const [sessionId] = useState(
+  const [sessionId, setSessionId] = useState(
     () => `hr_${Date.now()}_${Math.random().toString(16).slice(2)}`,
   );
+  const [chatSessions, setChatSessions] = useState<any[]>([]);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const threadRef = useRef<HTMLDivElement>(null);
   const selectedJob =
     jobs.find((job: any) => job.job_id === selectedJobId) || jobs[0];
   useEffect(() => {
@@ -1874,6 +1877,56 @@ function Assistant({ jobs }: { jobs: any[] }) {
       .then((data) => setGeminiKeyCount(Number(data.key_count || 0)))
       .catch(() => undefined);
   }, []);
+  useEffect(() => {
+    loadChatSessions();
+  }, []);
+  useEffect(() => {
+    const thread = threadRef.current;
+    if (thread) thread.scrollTop = thread.scrollHeight;
+  }, [messages, busy]);
+  async function loadChatSessions() {
+    const response = await fetch("/api/chat-sessions", { cache: "no-store" });
+    if (!response.ok) return;
+    const data = await response.json();
+    setChatSessions(data.sessions || []);
+  }
+  async function persistMessage(message: any, targetSessionId = sessionId) {
+    await fetch("/api/chat-sessions", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ session_id: targetSessionId, message }),
+    });
+    await loadChatSessions();
+  }
+  async function openChat(targetSessionId: string) {
+    const response = await fetch(
+      `/api/chat-sessions?session_id=${encodeURIComponent(targetSessionId)}`,
+      { cache: "no-store" },
+    );
+    if (!response.ok) return;
+    const data = await response.json();
+    setSessionId(targetSessionId);
+    setMessages(data.session?.messages || []);
+    setPending(null);
+    setHistoryOpen(false);
+  }
+  function newChat() {
+    setSessionId(`hr_${Date.now()}_${Math.random().toString(16).slice(2)}`);
+    setMessages([]);
+    setPending(null);
+    setQ("");
+    setHistoryOpen(false);
+  }
+  async function deleteChat(targetSessionId: string) {
+    if (!window.confirm("Xóa vĩnh viễn đoạn chat này khỏi MongoDB?")) return;
+    const response = await fetch(
+      `/api/chat-sessions?session_id=${encodeURIComponent(targetSessionId)}`,
+      { method: "DELETE" },
+    );
+    if (!response.ok) return;
+    if (targetSessionId === sessionId) newChat();
+    await loadChatSessions();
+  }
   async function send(e: FormEvent) {
     e.preventDefault();
     const query = q.trim();
@@ -1882,24 +1935,32 @@ function Assistant({ jobs }: { jobs: any[] }) {
       await runCvPipeline(query);
       return;
     }
-    setMessages((current) => [...current, { role: "user", text: query }]);
+    const userMessage = { role: "user", text: query };
+    setMessages((current) => [...current, userMessage]);
+    void persistMessage(userMessage);
     setQ("");
     setBusy(true);
     try {
       const r = await fetch("/api/agent", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ query, session_id: sessionId }),
+        body: JSON.stringify({
+          query,
+          session_id: sessionId,
+          history: messages.slice(-20).map((message) => ({
+            role: message.role === "agent" ? "assistant" : "user",
+            content: message.text,
+          })),
+        }),
       });
       const d = await r.json();
-      setMessages((current) => [
-        ...current,
-        {
-          role: "agent",
-          text: d.answer || d.error,
-          trace: d.trace || [],
-        },
-      ]);
+      const agentMessage = {
+        role: "agent",
+        text: d.answer || d.error,
+        trace: d.trace || [],
+      };
+      setMessages((current) => [...current, agentMessage]);
+      void persistMessage(agentMessage);
       setPending(d.confirmation || null);
     } finally {
       setBusy(false);
@@ -1919,10 +1980,13 @@ function Assistant({ jobs }: { jobs: any[] }) {
         }),
       });
       const d = await r.json();
-      setMessages((current) => [
-        ...current,
-        { role: "agent", text: d.answer || d.error, result: d.result },
-      ]);
+      const agentMessage = {
+        role: "agent",
+        text: d.answer || d.error,
+        result: d.result,
+      };
+      setMessages((current) => [...current, agentMessage]);
+      void persistMessage(agentMessage);
       setPending(null);
     } finally {
       setBusy(false);
@@ -1942,6 +2006,11 @@ function Assistant({ jobs }: { jobs: any[] }) {
         attachments: cvFiles.map((file) => file.name),
       },
     ]);
+    void persistMessage({
+      role: "user",
+      text: prompt || `Phân tích và chấm ${cvFiles.length} CV cho ${selectedJob.title}`,
+      attachments: cvFiles.map((file) => file.name),
+    });
     setQ("");
     try {
       const form = new FormData();
@@ -1964,6 +2033,13 @@ function Assistant({ jobs }: { jobs: any[] }) {
           criteria: data.criteria,
         },
       ]);
+      void persistMessage({
+        role: "agent",
+        text: data.answer || data.error,
+        trace: data.trace || [],
+        cvResults: data.results || [],
+        criteria: data.criteria,
+      });
       if (response.ok) setCvFiles([]);
     } finally {
       setBusy(false);
@@ -2050,6 +2126,15 @@ function Assistant({ jobs }: { jobs: any[] }) {
             <p>Trợ lý điều phối toàn bộ pipeline tuyển dụng</p>
           </div>
         </div>
+        <div className="assistant-chat-controls">
+          <button type="button" onClick={newChat}>＋ Đoạn chat mới</button>
+          <button
+            type="button"
+            onClick={() => setHistoryOpen((current) => !current)}
+          >
+            ☰ Lịch sử ({chatSessions.length})
+          </button>
+        </div>
         <button
           type="button"
           className="assistant-live"
@@ -2061,6 +2146,39 @@ function Assistant({ jobs }: { jobs: any[] }) {
           <b>⚙</b>
         </button>
       </header>
+      {historyOpen && (
+        <aside className="assistant-history">
+          <header>
+            <div>
+              <span>LỊCH SỬ HỘI THOẠI</span>
+              <strong>Các đoạn chat đã lưu trong MongoDB</strong>
+            </div>
+            <button type="button" onClick={() => setHistoryOpen(false)}>×</button>
+          </header>
+          <div>
+            {!chatSessions.length && <p>Chưa có cuộc hội thoại đã lưu.</p>}
+            {chatSessions.map((chat) => (
+              <article
+                key={chat.session_id}
+                className={chat.session_id === sessionId ? "active" : ""}
+              >
+                <button type="button" onClick={() => openChat(chat.session_id)}>
+                  <strong>{chat.title || "Cuộc hội thoại"}</strong>
+                  <small>{chat.message_count || 0} tin nhắn</small>
+                </button>
+                <button
+                  type="button"
+                  className="delete-chat"
+                  title="Xóa đoạn chat"
+                  onClick={() => deleteChat(chat.session_id)}
+                >
+                  ⌫
+                </button>
+              </article>
+            ))}
+          </div>
+        </aside>
+      )}
       {keySettingsOpen && (
         <form className="gemini-key-manager" onSubmit={saveGeminiKeys}>
           <div>
@@ -2208,7 +2326,7 @@ function Assistant({ jobs }: { jobs: any[] }) {
           </button>
         ))}
       </div>
-      <div className="assistant-thread">
+      <div className="assistant-thread" ref={threadRef}>
         {!messages.length && (
           <div className="assistant-empty">
             <strong>Bạn có thể giao việc bằng ngôn ngữ tự nhiên</strong>

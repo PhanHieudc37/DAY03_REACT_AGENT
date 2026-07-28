@@ -2254,7 +2254,9 @@ code {
   position: relative;
   display: flex;
   width: min(1120px, 100%);
-  min-height: calc(100vh - 190px);
+  height: calc(100vh - 150px);
+  min-height: 620px;
+  max-height: 900px;
   max-width: none;
   flex-direction: column;
   margin: -10px auto 0;
@@ -2303,6 +2305,119 @@ code {
   margin: 3px 0 0;
   color: #68778b;
   font-size: 10px;
+}
+.assistant-chat-controls {
+  display: flex;
+  gap: 7px;
+  margin-left: auto;
+  margin-right: 9px;
+}
+.assistant-chat-controls button {
+  padding: 8px 10px;
+  border: 1px solid #263445;
+  border-radius: 10px;
+  background: #0d141e;
+  color: #9cabbc;
+  font-size: 10px;
+  cursor: pointer;
+}
+.assistant-chat-controls button:hover {
+  border-color: #3b5874;
+  color: #e2eaf3;
+}
+.assistant-history {
+  position: absolute;
+  z-index: 20;
+  top: 72px;
+  right: 18px;
+  width: min(390px, calc(100% - 36px));
+  max-height: calc(100% - 95px);
+  overflow: hidden;
+  border: 1px solid #29394b;
+  border-radius: 16px;
+  background: #0a1019f7;
+  box-shadow: 0 22px 70px #000c;
+  backdrop-filter: blur(20px);
+}
+.assistant-history > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 15px;
+  border-bottom: 1px solid #202c3a;
+}
+.assistant-history > header span,
+.assistant-history > header strong {
+  display: block;
+}
+.assistant-history > header span {
+  color: #54d8a7;
+  font-size: 8px;
+  font-weight: 800;
+  letter-spacing: 0.09em;
+}
+.assistant-history > header strong {
+  margin-top: 4px;
+  color: #d9e3ee;
+  font-size: 12px;
+}
+.assistant-history > header button {
+  border: 0;
+  background: transparent;
+  color: #8290a1;
+  font-size: 20px;
+}
+.assistant-history > div {
+  max-height: 520px;
+  padding: 8px;
+  overflow-y: auto;
+}
+.assistant-history > div > p {
+  padding: 24px 12px;
+  color: #718095;
+  font-size: 11px;
+  text-align: center;
+}
+.assistant-history article {
+  display: grid;
+  grid-template-columns: 1fr 34px;
+  gap: 5px;
+  margin-bottom: 4px;
+  border: 1px solid transparent;
+  border-radius: 11px;
+}
+.assistant-history article.active {
+  border-color: #2a516b;
+  background: #10202d;
+}
+.assistant-history article > button:first-child {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+  padding: 10px;
+  border: 0;
+  background: transparent;
+  color: #c9d5e2;
+  text-align: left;
+}
+.assistant-history article strong {
+  overflow: hidden;
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.assistant-history article small {
+  color: #68798d;
+  font-size: 8px;
+}
+.assistant-history .delete-chat {
+  border: 0;
+  background: transparent;
+  color: #7b8795;
+  cursor: pointer;
+}
+.assistant-history .delete-chat:hover {
+  color: #ff8095;
 }
 .assistant-live {
   display: flex;
@@ -2454,7 +2569,7 @@ code {
 }
 .react-assistant .assistant-thread {
   display: flex;
-  min-height: 390px;
+  min-height: 0;
   max-height: none;
   flex: 1 1 auto;
   flex-direction: column;

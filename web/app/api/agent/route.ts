@@ -103,6 +103,72 @@ async function geminiDecision(history: unknown[]) {
   ) as Record<string, unknown>;
 }
 
+async function resolveUploadCriteria(
+  baseCriteria: Record<string, any>,
+  instruction: string,
+) {
+  if (!instruction.trim()) return { criteria: baseCriteria, overridden: false };
+  const response = await fetch(`${apiBase()}/ai/gemini-generate`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      system_instruction: {
+        parts: [{
+          text: `Phân tích yêu cầu chấm CV của HR. Chỉ trả JSON:
+{"override":boolean,"only_criteria":boolean,"must_have_skills":[],"nice_to_have_skills":[]}.
+override=true chỉ khi HR nêu tiêu chí mới hoặc yêu cầu thay tiêu chí JD đang chọn.
+only_criteria=true khi HR nói rõ chỉ/mỗi/duy nhất tiêu chí vừa nêu.
+Tiêu chí về công ty từng làm việc, ví dụ FPT, đặt trong must_have_skills.
+Không tự thêm tiêu chí HR không nói.`,
+        }],
+      },
+      contents: [{
+        role: "user",
+        parts: [{ text: JSON.stringify({
+          instruction,
+          current_criteria: {
+            must_have_skills: baseCriteria.must_have_skills || [],
+            nice_to_have_skills: baseCriteria.nice_to_have_skills || [],
+          },
+        }) }],
+      }],
+      generationConfig: { responseMimeType: "application/json", temperature: 0 },
+    }),
+  });
+  const data = (await response.json()) as {
+    candidates?: Array<{ content: { parts: Array<{ text: string }> } }>;
+    detail?: string;
+  };
+  if (!response.ok)
+    throw new Error(data.detail || "AI không thể phân tích tiêu chí HR vừa nhập.");
+  const parsed = JSON.parse(
+    data.candidates?.[0]?.content.parts[0]?.text || "{}",
+  ) as {
+    override?: boolean;
+    only_criteria?: boolean;
+    must_have_skills?: string[];
+    nice_to_have_skills?: string[];
+  };
+  if (!parsed.override) return { criteria: baseCriteria, overridden: false };
+  return {
+    overridden: true,
+    criteria: {
+      ...baseCriteria,
+      must_have_skills: parsed.must_have_skills || [],
+      nice_to_have_skills: parsed.nice_to_have_skills || [],
+      ...(parsed.only_criteria ? {
+        required_certifications: [],
+        min_experience_years: 0,
+        ideal_experience_years: 0,
+        min_education: "high_school",
+        preferred_majors: [],
+        experience_domains: [],
+        weights: { skills: 100, experience: 0, education: 0, other: 0 },
+      } : {}),
+    },
+  };
+}
+
 async function openAiCompatibleDecision(
   history: unknown[],
   provider: "openai" | "openrouter",
@@ -364,6 +430,7 @@ export async function POST(request: Request) {
       const form = await request.formData();
       const jobId = String(form.get("job_id") || "");
       const sessionId = String(form.get("session_id") || "agent_upload");
+      const instruction = String(form.get("prompt") || "");
       const files = form
         .getAll("files")
         .filter((item): item is File => item instanceof File && item.size > 0);
@@ -391,11 +458,17 @@ export async function POST(request: Request) {
           { status: jobResponse.status },
         );
 
+      const resolved = await resolveUploadCriteria(jobData.job, instruction);
+      const appliedCriteria = resolved.criteria;
       const results: Record<string, unknown>[] = [];
       for (const file of files) {
         const upstreamForm = new FormData();
         upstreamForm.set("file", file, file.name);
-        upstreamForm.set("criteria", JSON.stringify(jobData.job));
+        upstreamForm.set("criteria", JSON.stringify(appliedCriteria));
+        upstreamForm.set(
+          "persist_criteria",
+          resolved.overridden ? "false" : "true",
+        );
         upstreamForm.set("cover_letter", "");
         upstreamForm.set("expected_salary", "");
         upstreamForm.set("available_date", "");
@@ -421,8 +494,11 @@ export async function POST(request: Request) {
       const failed = results.length - succeeded;
       return Response.json({
         session_id: sessionId,
-        answer: `Đã hoàn tất pipeline ${succeeded}/${results.length} CV cho ${jobData.job.title || jobId}.${failed ? ` Có ${failed} file lỗi.` : ""} Candidate, Application, điểm và file gốc đã được lưu vào MongoDB.`,
-        criteria: jobData.job,
+        answer: `${resolved.overridden ? "AI đã áp dụng tiêu chí HR nhập trong đoạn chat. " : ""}Đã hoàn tất pipeline ${succeeded}/${results.length} CV cho ${jobData.job.title || jobId}.${failed ? ` Có ${failed} file lỗi.` : ""} Candidate, Application, điểm, tiêu chí chấm và file gốc đã được lưu vào MongoDB.`,
+        criteria: appliedCriteria,
+        criteria_source: resolved.overridden
+          ? "chat_instruction"
+          : "saved_job",
         results,
         trace: [
           {
@@ -450,6 +526,7 @@ export async function POST(request: Request) {
       session_id?: string;
       confirmation_id?: string;
       confirmed?: boolean;
+      history?: Array<{ role: "user" | "assistant"; content: string }>;
     };
     const sessionId =
       body.session_id || `agent_${crypto.randomUUID().replaceAll("-", "")}`;
@@ -475,12 +552,20 @@ export async function POST(request: Request) {
         { status: 400 },
       );
 
-    const quickAnswer = await localAnswer(query, sessionId);
-    if (quickAnswer)
-      return Response.json({ ...quickAnswer, session_id: sessionId });
-
     const trace: TraceStep[] = [];
-    const history: unknown[] = [{ role: "user", content: query }];
+    const recentHistory = Array.isArray(body.history)
+      ? body.history
+          .filter(
+            (message) =>
+              (message.role === "user" || message.role === "assistant") &&
+              typeof message.content === "string",
+          )
+          .slice(-20)
+      : [];
+    const history: unknown[] = [
+      ...recentHistory,
+      { role: "user", content: query },
+    ];
     const seen = new Set<string>();
 
     for (let step = 1; step <= 8; step++) {
@@ -502,7 +587,7 @@ export async function POST(request: Request) {
           answer: decision.final_answer,
           trace,
           session_id: sessionId,
-          provider: "gemini",
+          provider: (process.env.LLM_PROVIDER || "gemini").toLowerCase(),
         });
       }
 

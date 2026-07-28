@@ -369,3 +369,4 @@ Chạy bộ Test Cases trên cả Chatbot Baseline và ReAct Agent, hoàn thiệ
 ---
 
 > 🎯 **Thông điệp cuối cùng**: Đừng chỉ đánh giá Agent bằng câu trả lời cuối cùng. Hãy đánh giá toàn bộ hành trình — từ Tool contract, Action, Observation, cơ chế tự phục hồi lỗi, phanh an toàn Guardrail đến nhật ký Trace Log định lượng!
+////

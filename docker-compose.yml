@@ -1,0 +1,58 @@
+services:
+  mongodb:
+    image: mongo:8.0
+    container_name: recruitflow-mongodb
+    restart: unless-stopped
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: recruitflow
+      MONGO_INITDB_ROOT_PASSWORD: recruitflow_dev_password
+      MONGO_INITDB_DATABASE: recruitflow
+    ports:
+      - "27018:27017"
+    volumes:
+      - recruitflow_mongo_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  api:
+    build: ./mongo-api
+    container_name: recruitflow-api
+    restart: unless-stopped
+    environment:
+      MONGODB_URI: mongodb://recruitflow:recruitflow_dev_password@mongodb:27017/recruitflow?authSource=admin
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      LLM_MODEL: ${LLM_MODEL:-gemini-2.5-flash}
+      MAIL_HOST: ${MAIL_HOST:-}
+      MAIL_PORT: ${MAIL_PORT:-587}
+      MAIL_SECURE: ${MAIL_SECURE:-false}
+      MAIL_USER: ${MAIL_USER:-}
+      MAIL_PASS: ${MAIL_PASS:-}
+      MAIL_FROM: ${MAIL_FROM:-}
+      PUBLIC_APP_URL: ${PUBLIC_APP_URL:-http://localhost:3000}
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./.secrets:/app/.secrets
+    depends_on:
+      mongodb:
+        condition: service_healthy
+
+  mongo-express:
+    image: mongo-express:1.0.2
+    container_name: recruitflow-mongo-express
+    restart: unless-stopped
+    environment:
+      ME_CONFIG_MONGODB_URL: mongodb://recruitflow:recruitflow_dev_password@mongodb:27017/?authSource=admin
+      ME_CONFIG_BASICAUTH_USERNAME: admin
+      ME_CONFIG_BASICAUTH_PASSWORD: recruitflow_admin
+    ports:
+      - "8081:8081"
+    depends_on:
+      mongodb:
+        condition: service_healthy
+
+volumes:
+  recruitflow_mongo_data:

@@ -1,0 +1,12 @@
+flowchart TD
+    U["Yêu cầu của HR"] --> C{"Có cần dữ liệu hồ sơ, điểm hoặc lịch?"}
+    C -->|"Không: chính sách/khái niệm"| B["Chatbot baseline"]
+    C -->|"Có"| A["ReAct Agent"]
+    A --> G{"Thao tác thay đổi trạng thái?"}
+    G -->|"Không"| R["Tool read-only: score/rank/find slots"]
+    G -->|"Có: đặt lịch"| H{"HR đã phê duyệt?"}
+    H -->|"Chưa"| S["Dừng an toàn và yêu cầu phê duyệt"]
+    H -->|"Đã duyệt"| M["Đặt lịch mô phỏng"]
+    R --> O["Observation có bằng chứng"]
+    M --> O
+    O --> F["Final Answer + nhắc HR quyết định cuối"]

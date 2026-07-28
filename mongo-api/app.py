@@ -1,5 +1,6 @@
-import base64, io, json, os, uuid, zipfile
+import base64, io, json, os, smtplib, ssl, uuid, zipfile
 from datetime import datetime, timezone
+from email.message import EmailMessage
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from gridfs import GridFS
@@ -19,6 +20,7 @@ def clean(doc):
         if isinstance(v,datetime):doc[k]=v.isoformat()
     return doc
 def validate_criteria(c):
+    c=dict(c);c.pop("_id",None)
     total=sum(float(v) for v in c["weights"].values())
     if abs(total-100)>.01:raise HTTPException(400,f"Tổng trọng số phải bằng 100% (hiện {total}%).")
     if not c.get("title") or not c.get("must_have_skills"):raise HTTPException(400,"Thiếu tên vị trí hoặc kỹ năng bắt buộc.")
@@ -51,6 +53,18 @@ def parse_cv(content,content_type,extra):
     res=requests.post(url,json=payload,timeout=60)
     if not res.ok:raise HTTPException(422,"Gemini không đọc được CV này.")
     data=json.loads(res.json()["candidates"][0]["content"]["parts"][0]["text"]);data.update(extra);return data
+def send_booking_email(to_email,candidate_name,job_title,invite):
+    required=["MAIL_HOST","MAIL_USER","MAIL_PASS","MAIL_FROM"]
+    if not all(os.getenv(x) for x in required):raise HTTPException(503,"SMTP chưa được cấu hình đầy đủ.")
+    msg=EmailMessage();msg["Subject"]=f"Mời chọn lịch phỏng vấn – {job_title}";msg["From"]=os.environ["MAIL_FROM"];msg["To"]=to_email
+    slots="".join(f"<li>{x}</li>" for x in invite["available_slots"])
+    msg.set_content(f"Xin chào {candidate_name}, vui lòng chọn lịch phỏng vấn tại: {invite['booking_link']}")
+    msg.add_alternative(f"""<html><body style="font-family:Arial,sans-serif;color:#17231f"><h2>RecruitFlow – Mời chọn lịch phỏng vấn</h2><p>Xin chào <strong>{candidate_name}</strong>,</p><p>Hồ sơ của bạn cho vị trí <strong>{job_title}</strong> đã được duyệt. Các khung giờ đang mở:</p><ul>{slots}</ul><p><a href="{invite['booking_link']}" style="display:inline-block;padding:12px 20px;background:#174f3c;color:white;text-decoration:none;border-radius:8px">Chọn lịch phỏng vấn</a></p><p>Khung giờ chỉ được giữ sau khi bạn xác nhận.</p></body></html>""",subtype="html")
+    host=os.environ["MAIL_HOST"];port=int(os.getenv("MAIL_PORT","587"));secure=os.getenv("MAIL_SECURE","false").lower() in ["1","true","yes"]
+    if secure:
+        with smtplib.SMTP_SSL(host,port,context=ssl.create_default_context(),timeout=30) as server:server.login(os.environ["MAIL_USER"],os.environ["MAIL_PASS"]);server.send_message(msg)
+    else:
+        with smtplib.SMTP(host,port,timeout=30) as server:server.ehlo();server.starttls(context=ssl.create_default_context());server.login(os.environ["MAIL_USER"],os.environ["MAIL_PASS"]);server.send_message(msg)
 @app.on_event("startup")
 def setup():
     db.jobs.create_index([("job_id",ASCENDING)],unique=True);db.candidates.create_index([("candidate_id",ASCENDING)],unique=True);db.applications.create_index([("application_id",ASCENDING)],unique=True);db.interviews.create_index([("interview_id",ASCENDING)],unique=True);db.interview_invites.create_index([("invite_id",ASCENDING)],unique=True)
@@ -61,6 +75,12 @@ def dashboard():return {"ok":True,"counts":{"jobs":db.jobs.count_documents({}),"
 @app.post("/jobs")
 def save_job(payload:dict):
     c=validate_criteria(payload);db.jobs.update_one({"job_id":c["job_id"]},{"$set":c},upsert=True);return {"ok":True,"criteria":clean(db.jobs.find_one({"job_id":c["job_id"]}))}
+@app.delete("/jobs/{job_id}")
+def delete_job(job_id:str):
+    if db.applications.count_documents({"job_id":job_id})>0:raise HTTPException(409,"Không thể xóa vị trí đã có hồ sơ ứng tuyển. Hãy ngừng sử dụng thay vì xóa.")
+    result=db.jobs.delete_one({"job_id":job_id})
+    if not result.deleted_count:raise HTTPException(404,"Không tìm thấy vị trí.")
+    return {"ok":True,"deleted_job_id":job_id}
 @app.post("/applications")
 async def application(file:UploadFile=File(...),criteria:str=Form(...),cover_letter:str=Form(""),expected_salary:str=Form(""),available_date:str=Form(""),screening_answer:str=Form("")):
     c=validate_criteria(json.loads(criteria));db.jobs.update_one({"job_id":c["job_id"]},{"$set":c},upsert=True)
@@ -108,11 +128,25 @@ def interview_actions(payload:dict):
         application=db.applications.find_one({"application_id":payload.get("application_id")})
         if not application:raise HTTPException(404,"Application không tồn tại.")
         interviewer_ids=payload.get("interviewer_ids") or ["interviewer_003"];duration=int(payload.get("interview_duration_minutes",45))
-        base=["2026-08-01T09:00:00+07:00","2026-08-01T14:00:00+07:00","2026-08-02T10:00:00+07:00","2026-08-03T14:00:00+07:00"]
+        base=payload.get("available_slots") or []
+        if len(base)<1:raise HTTPException(400,"HR phải thiết lập ít nhất một khung giờ phỏng vấn.")
         busy={x["scheduled_time"] for x in db.interviews.find({"interviewer_ids":{"$in":interviewer_ids},"status":{"$nin":["cancelled"]}},{"scheduled_time":1})}
-        slots=[x for x in base if x not in busy][:3];invite_id=f"invite_{uuid.uuid4().hex[:8]}"
-        invite={"invite_id":invite_id,"application_id":application["application_id"],"candidate_id":application["candidate_id"],"job_id":application["job_id"],"interviewer_ids":interviewer_ids,"interview_duration_minutes":duration,"interview_type":payload.get("interview_type","online"),"interview_round":int(payload.get("interview_round",1)),"available_slots":slots,"booking_link":f"http://localhost:3000/schedule/{invite_id}","status":"sent_to_candidate","delivery_mode":"simulated","created_at":now()}
-        db.interview_invites.insert_one(invite);db.applications.update_one({"application_id":application["application_id"]},{"$set":{"hr_approved":True,"stage":"interview_invited","approved_at":now()}})
+        slots=list(dict.fromkeys(x for x in base if x and x not in busy))
+        if len(slots)>20:raise HTTPException(400,"Mỗi lời mời chỉ được tối đa 20 khung giờ.")
+        invite_id=f"invite_{uuid.uuid4().hex[:8]}"
+        if not slots:raise HTTPException(409,"Tất cả khung giờ HR chọn đều đang bận.")
+        candidate=db.candidates.find_one({"candidate_id":application["candidate_id"]});job=db.jobs.find_one({"job_id":application["job_id"]})
+        if not candidate or not candidate.get("email"):raise HTTPException(400,"Ứng viên chưa có email để gửi lời mời.")
+        app_url=(payload.get("public_app_url") or os.getenv("PUBLIC_APP_URL") or "http://localhost:3000").rstrip("/")
+        invite={"invite_id":invite_id,"application_id":application["application_id"],"candidate_id":application["candidate_id"],"candidate_name":candidate.get("full_name","Ứng viên"),"recipient_email":candidate["email"],"job_id":application["job_id"],"job_title":(job or {}).get("title",application["job_id"]),"interviewer_ids":interviewer_ids,"interview_duration_minutes":duration,"interview_type":payload.get("interview_type","online"),"interview_round":int(payload.get("interview_round",1)),"available_slots":slots,"booking_link":f"{app_url}/schedule/{invite_id}","status":"sending","delivery_mode":"smtp","created_at":now()}
+        db.interview_invites.insert_one(invite)
+        try:send_booking_email(candidate["email"],candidate.get("full_name","Ứng viên"),(job or {}).get("title",application["job_id"]),invite)
+        except Exception as exc:
+            db.interview_invites.update_one({"invite_id":invite_id},{"$set":{"status":"email_failed","email_error":str(exc)}})
+            if isinstance(exc,HTTPException):raise
+            raise HTTPException(502,f"Không gửi được email: {exc}")
+        db.interview_invites.update_one({"invite_id":invite_id},{"$set":{"status":"sent_to_candidate","sent_at":now()}});invite=db.interview_invites.find_one({"invite_id":invite_id})
+        db.applications.update_one({"application_id":application["application_id"]},{"$set":{"hr_approved":True,"stage":"interview_invited","approved_at":now()}})
         return {"ok":True,"invite":clean(invite)}
     if action=="confirm_slot":
         invite=db.interview_invites.find_one({"invite_id":payload.get("invite_id")})
@@ -144,3 +178,15 @@ def interview_actions(payload:dict):
         db.applications.update_one({"application_id":interview["application_id"]},{"$set":{"stage":stage,"next_action":next_action,"final_status":"in_progress" if next_action!="close_application" else "rejected"}})
         return {"ok":True,"application_id":interview["application_id"],"stage":stage,"next_action":next_action,"final_status":"in_progress" if next_action!="close_application" else "rejected"}
     raise HTTPException(400,"Action phỏng vấn không hợp lệ.")
+
+@app.get("/public/invites/{invite_id}")
+def public_invite(invite_id:str):
+    invite=db.interview_invites.find_one({"invite_id":invite_id})
+    if not invite:raise HTTPException(404,"Lời mời không tồn tại.")
+    application=db.applications.find_one({"application_id":invite["application_id"]});candidate=db.candidates.find_one({"candidate_id":invite["candidate_id"]});job=db.jobs.find_one({"job_id":invite["job_id"]})
+    busy={x["scheduled_time"] for x in db.interviews.find({"interviewer_ids":{"$in":invite["interviewer_ids"]},"status":{"$nin":["cancelled"]}},{"scheduled_time":1})}
+    return {"ok":True,"invite":{"invite_id":invite["invite_id"],"candidate_name":(candidate or {}).get("full_name","Ứng viên"),"job_title":(job or {}).get("title",invite["job_id"]),"duration_minutes":invite["interview_duration_minutes"],"interview_type":invite["interview_type"],"interview_round":invite["interview_round"],"available_slots":[x for x in invite.get("available_slots",[]) if x not in busy],"status":invite["status"],"chosen_slot":invite.get("chosen_slot")}}
+
+@app.post("/public/invites/{invite_id}/confirm")
+def public_confirm(invite_id:str,payload:dict):
+    return interview_actions({"action":"confirm_slot","invite_id":invite_id,"chosen_slot":payload.get("chosen_slot")})

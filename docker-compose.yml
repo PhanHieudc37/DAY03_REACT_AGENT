@@ -25,8 +25,17 @@ services:
       MONGODB_URI: mongodb://recruitflow:recruitflow_dev_password@mongodb:27017/recruitflow?authSource=admin
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
       LLM_MODEL: ${LLM_MODEL:-gemini-2.5-flash}
+      MAIL_HOST: ${MAIL_HOST:-}
+      MAIL_PORT: ${MAIL_PORT:-587}
+      MAIL_SECURE: ${MAIL_SECURE:-false}
+      MAIL_USER: ${MAIL_USER:-}
+      MAIL_PASS: ${MAIL_PASS:-}
+      MAIL_FROM: ${MAIL_FROM:-}
+      PUBLIC_APP_URL: ${PUBLIC_APP_URL:-http://localhost:3000}
     ports:
       - "8000:8000"
+    volumes:
+      - ./.secrets:/app/.secrets
     depends_on:
       mongodb:
         condition: service_healthy

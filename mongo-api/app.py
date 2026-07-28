@@ -1,6 +1,7 @@
-import base64, io, json, os, smtplib, ssl, uuid, zipfile
+import base64, io, json, os, smtplib, ssl, threading, uuid, zipfile
 from datetime import datetime, timezone
 from email.message import EmailMessage
+from pathlib import Path
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from gridfs import GridFS
@@ -11,8 +12,37 @@ app=FastAPI(title="RecruitFlow Mongo API",version="1.0.0")
 app.add_middleware(CORSMiddleware,allow_origins=["http://localhost:3000","http://localhost:3001","http://localhost:3002"],allow_methods=["*"],allow_headers=["*"])
 client=MongoClient(os.getenv("MONGODB_URI","mongodb://localhost:27017/recruitflow"))
 db=client.get_default_database(); fs=GridFS(db)
+GEMINI_KEYS_FILE=Path(os.getenv("GEMINI_KEYS_FILE","/app/.secrets/gemini_keys.json"))
+gemini_key_lock=threading.Lock();gemini_key_index=0
 
 def now(): return datetime.now(timezone.utc)
+def load_gemini_keys():
+    keys=[]
+    try:
+        if GEMINI_KEYS_FILE.exists():keys=json.loads(GEMINI_KEYS_FILE.read_text(encoding="utf-8"))
+    except Exception:keys=[]
+    env_key=os.getenv("GEMINI_API_KEY","").strip()
+    if env_key:keys.append(env_key)
+    return list(dict.fromkeys(x.strip() for x in keys if isinstance(x,str) and x.strip()))
+def rotated_gemini_keys():
+    global gemini_key_index
+    keys=load_gemini_keys()
+    if not keys:return []
+    with gemini_key_lock:
+        start=gemini_key_index%len(keys);gemini_key_index=(gemini_key_index+1)%len(keys)
+    return keys[start:]+keys[:start]
+def gemini_request(payload,timeout=60):
+    keys=rotated_gemini_keys()
+    if not keys:raise HTTPException(503,"Chưa cấu hình Gemini API key.")
+    model=os.getenv("LLM_MODEL") or "gemini-2.5-flash";last_error=""
+    for key in keys:
+        url=f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}"
+        res=requests.post(url,json=payload,timeout=timeout)
+        if res.ok:return res
+        try:last_error=(res.json().get("error") or {}).get("message","")
+        except Exception:last_error=res.text[:200]
+        if res.status_code not in [400,403,429]:break
+    raise HTTPException(429,f"Tất cả {len(keys)} Gemini API key đều hết hạn mức hoặc không khả dụng. {last_error[:160]}")
 def clean(doc):
     if not doc:return None
     doc=dict(doc);doc["_id"]=str(doc["_id"])
@@ -45,13 +75,9 @@ def score(candidate,c):
     else:tier,label,action,stage,email="rejected","Không phù hợp","Tự động loại và chuẩn bị email từ chối","rejected","rejection_pending"
     return {"match_score":total,"breakdown":{"skills_score":ss,"experience_score":es,"education_score":eds,"other_score":other},"missing_must_have":missing,"matched_nice_to_have":matched_nice,"hard_rejected":hard_rejected,"tier":tier,"recommendation":label,"next_action":action,"stage":stage,"email_status":email,"explanation":(f"Loại cứng vì thiếu kỹ năng bắt buộc: {', '.join(missing)}." if missing else "Loại cứng vì câu trả lời sàng lọc không đạt yêu cầu.") if hard_rejected else f"Khớp đủ kỹ năng bắt buộc; {candidate.get('experience_years',0)}/{ideal} năm kinh nghiệm lý tưởng; tổng {total}/100."}
 def parse_cv(content,content_type,extra):
-    key=os.getenv("GEMINI_API_KEY")
-    if not key:raise HTTPException(503,"Chưa cấu hình GEMINI_API_KEY cho API.")
     prompt='Trích xuất CV thành JSON thuần: {"full_name":"","email":"","phone":"","skills":[],"experience_years":0,"experience_domains":[],"certifications":[],"languages":[{"language":"","level":""}],"work_history":[{"company":"","role":"","duration":""}],"education":[{"degree":"high_school|college|bachelor|master|phd","school":"","major":""}]}. Không bịa dữ liệu.'
-    url=f"https://generativelanguage.googleapis.com/v1beta/models/{os.getenv('LLM_MODEL','gemini-2.5-flash')}:generateContent?key={key}"
     payload={"contents":[{"parts":[{"text":prompt},{"inline_data":{"mime_type":content_type or "application/pdf","data":base64.b64encode(content).decode()}}]}],"generationConfig":{"responseMimeType":"application/json","temperature":0}}
-    res=requests.post(url,json=payload,timeout=60)
-    if not res.ok:raise HTTPException(422,"Gemini không đọc được CV này.")
+    res=gemini_request(payload,60)
     data=json.loads(res.json()["candidates"][0]["content"]["parts"][0]["text"]);data.update(extra);return data
 def send_booking_email(to_email,candidate_name,job_title,invite):
     required=["MAIL_HOST","MAIL_USER","MAIL_PASS","MAIL_FROM"]
@@ -70,6 +96,27 @@ def setup():
     db.jobs.create_index([("job_id",ASCENDING)],unique=True);db.candidates.create_index([("candidate_id",ASCENDING)],unique=True);db.applications.create_index([("application_id",ASCENDING)],unique=True);db.interviews.create_index([("interview_id",ASCENDING)],unique=True);db.interview_invites.create_index([("invite_id",ASCENDING)],unique=True);db.agent_pending_actions.create_index([("confirmation_id",ASCENDING)],unique=True);db.agent_audit_logs.create_index([("created_at",ASCENDING)])
 @app.get("/health")
 def health():client.admin.command("ping");return {"ok":True,"database":"mongodb","collections":db.list_collection_names()}
+@app.get("/ai-settings/gemini")
+def gemini_settings():
+    keys=load_gemini_keys()
+    return {"ok":True,"key_count":len(keys),"rotation":"round_robin"}
+@app.post("/ai-settings/gemini")
+def save_gemini_settings(payload:dict):
+    raw=payload.get("keys") or []
+    if isinstance(raw,str):raw=raw.splitlines()
+    keys=list(dict.fromkeys(str(x).strip() for x in raw if str(x).strip()))
+    if len(keys)>50:raise HTTPException(400,"Chỉ được lưu tối đa 50 API key.")
+    invalid=[x for x in keys if len(x)<20]
+    if invalid:raise HTTPException(400,"Có API key không hợp lệ hoặc quá ngắn.")
+    GEMINI_KEYS_FILE.parent.mkdir(parents=True,exist_ok=True)
+    GEMINI_KEYS_FILE.write_text(json.dumps(keys),encoding="utf-8")
+    try:os.chmod(GEMINI_KEYS_FILE,0o600)
+    except OSError:pass
+    return {"ok":True,"key_count":len(load_gemini_keys()),"saved_key_count":len(keys),"rotation":"round_robin"}
+@app.post("/ai/gemini-generate")
+def gemini_generate(payload:dict):
+    res=gemini_request(payload,60)
+    return res.json()
 @app.get("/dashboard")
 def dashboard():return {"ok":True,"counts":{"jobs":db.jobs.count_documents({}),"candidates":db.candidates.count_documents({}),"applications":db.applications.count_documents({}),"interviews":db.interviews.count_documents({})},"jobs":[clean(x) for x in db.jobs.find().sort("updated_at",-1).limit(10)],"candidates":[clean(x) for x in db.candidates.find().sort("created_at",-1).limit(20)],"applications":[clean(x) for x in db.applications.find().sort("created_at",-1).limit(100)],"interviews":[clean(x) for x in db.interviews.find().sort("scheduled_time",-1).limit(100)],"invites":[clean(x) for x in db.interview_invites.find().sort("created_at",-1).limit(100)]}
 
@@ -169,9 +216,14 @@ async def application(file:UploadFile=File(...),criteria:str=Form(...),cover_let
     extra={"cover_letter":cover_letter,"expected_salary":expected_salary,"available_date":available_date,"screening_answer":screening_answer}
     def process_one(data,filename,mime):
         file_id=fs.put(data,filename=filename,content_type=mime,uploaded_at=now())
-        cand=parse_cv(data,mime,extra);cand.update({"candidate_id":f"cand_{uuid.uuid4().hex[:8]}","cv_file_id":str(file_id),"cv_filename":filename,"created_at":now()});db.candidates.insert_one(cand)
-        matching=score(cand,c);app_id=f"app_{uuid.uuid4().hex[:8]}";application={"application_id":app_id,"candidate_id":cand["candidate_id"],"job_id":c["job_id"],**matching,"hr_approved":False,"created_at":now()};db.applications.insert_one(application)
-        return clean(cand),clean(application)
+        try:
+            cand=parse_cv(data,mime,extra);cand.update({"candidate_id":f"cand_{uuid.uuid4().hex[:8]}","cv_file_id":str(file_id),"cv_filename":filename,"created_at":now()});db.candidates.insert_one(cand)
+            matching=score(cand,c);app_id=f"app_{uuid.uuid4().hex[:8]}";application={"application_id":app_id,"candidate_id":cand["candidate_id"],"job_id":c["job_id"],**matching,"hr_approved":False,"created_at":now()};db.applications.insert_one(application)
+            return clean(cand),clean(application)
+        except Exception:
+            fs.delete(file_id)
+            if "cand" in locals():db.candidates.delete_one({"candidate_id":cand.get("candidate_id")})
+            raise
     if (file.filename or "").lower().endswith(".zip"):
         results=[];errors=[];allowed={".pdf",".doc",".docx",".jpg",".jpeg",".png",".txt"}
         try:

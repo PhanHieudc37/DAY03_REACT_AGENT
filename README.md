@@ -71,3 +71,58 @@ timeline
 
 > 🚀 **BẮT ĐẦU LÀM BÀI**:
 > Vui lòng mở sổ tay thực hành 👉 **[PHAN_CONG_CONG_VIEC.md](file:///c:/Users/Admin/Documents/VinUni/LabCoachVin/LabKeyCoach/Day-3-Lab-Chatbot-vs-react-agent-E402/docs/PHAN_CONG_CONG_VIEC.md)** để xem phân vai và checklist công việc cụ thể cho từng thành viên!
+
+---
+
+## 5. Bản triển khai: Trợ lý sàng lọc CV
+
+Repo đã được hiện thực theo `plan-tro-ly-tuyen-dung.md` dưới dạng MVP offline:
+
+- Chấm điểm có giải thích, xếp hạng ứng viên và tìm slot phỏng vấn.
+- ReAct trace `Thought -> Action -> Observation`, giới hạn vòng lặp và chống action lặp.
+- Không dùng thuộc tính nhạy cảm; kết quả chỉ là gợi ý và luôn cần HR review.
+- Đặt lịch chỉ mô phỏng và bắt buộc có phê duyệt rõ ràng.
+
+Chạy demo và kiểm thử:
+
+```bash
+python src/app.py
+python src/app.py --case 3 --mode agent
+python -m unittest discover -s tests -v
+```
+
+Dữ liệu trong `src/tools.py` là fixture giả lập (`example.test`), không phải dữ liệu cá nhân thật.
+
+Chạy Agent bằng Gemini đã cấu hình trong `.env`:
+
+```bash
+python src/app.py --planner llm --mode agent --query "Chấm điểm CV-001 cho JOB-001"
+```
+
+### Giao diện web
+
+Dashboard tích hợp chế độ Gemini/offline, bảng ứng viên, kết quả và trace ReAct:
+
+```bash
+python run_web.py
+```
+
+Sau đó mở địa chỉ được in trong terminal, thường là `http://localhost:3000`.
+
+### MongoDB bằng Docker
+
+Khởi động MongoDB, backend API và Mongo Express:
+
+```bash
+docker compose up -d --build
+python run_web.py
+```
+
+- Dashboard: `http://localhost:3000`
+- Backend API/OpenAPI: `http://localhost:8000/docs`
+- Mongo Express: `http://localhost:8081` (`admin` / `recruitflow_admin`)
+- MongoDB từ máy host: `mongodb://recruitflow:recruitflow_dev_password@localhost:27018/recruitflow?authSource=admin`
+
+Dữ liệu được lưu bền vững trong Docker volume `recruitflow_mongo_data`. CV gốc được
+lưu bằng GridFS; dữ liệu có cấu trúc nằm trong các collection `jobs`, `candidates`,
+`applications` và `interviews`.

@@ -67,11 +67,91 @@ def send_booking_email(to_email,candidate_name,job_title,invite):
         with smtplib.SMTP(host,port,timeout=30) as server:server.ehlo();server.starttls(context=ssl.create_default_context());server.login(os.environ["MAIL_USER"],os.environ["MAIL_PASS"]);server.send_message(msg)
 @app.on_event("startup")
 def setup():
-    db.jobs.create_index([("job_id",ASCENDING)],unique=True);db.candidates.create_index([("candidate_id",ASCENDING)],unique=True);db.applications.create_index([("application_id",ASCENDING)],unique=True);db.interviews.create_index([("interview_id",ASCENDING)],unique=True);db.interview_invites.create_index([("invite_id",ASCENDING)],unique=True)
+    db.jobs.create_index([("job_id",ASCENDING)],unique=True);db.candidates.create_index([("candidate_id",ASCENDING)],unique=True);db.applications.create_index([("application_id",ASCENDING)],unique=True);db.interviews.create_index([("interview_id",ASCENDING)],unique=True);db.interview_invites.create_index([("invite_id",ASCENDING)],unique=True);db.agent_pending_actions.create_index([("confirmation_id",ASCENDING)],unique=True);db.agent_audit_logs.create_index([("created_at",ASCENDING)])
 @app.get("/health")
 def health():client.admin.command("ping");return {"ok":True,"database":"mongodb","collections":db.list_collection_names()}
 @app.get("/dashboard")
 def dashboard():return {"ok":True,"counts":{"jobs":db.jobs.count_documents({}),"candidates":db.candidates.count_documents({}),"applications":db.applications.count_documents({}),"interviews":db.interviews.count_documents({})},"jobs":[clean(x) for x in db.jobs.find().sort("updated_at",-1).limit(10)],"candidates":[clean(x) for x in db.candidates.find().sort("created_at",-1).limit(20)],"applications":[clean(x) for x in db.applications.find().sort("created_at",-1).limit(100)],"interviews":[clean(x) for x in db.interviews.find().sort("scheduled_time",-1).limit(100)],"invites":[clean(x) for x in db.interview_invites.find().sort("created_at",-1).limit(100)]}
+
+def audit_agent(session_id,tool_name,arguments,observation,status="completed"):
+    event={"audit_id":f"audit_{uuid.uuid4().hex[:10]}","session_id":session_id or "anonymous","tool_name":tool_name,"arguments":arguments,"observation":observation,"status":status,"created_at":now()}
+    db.agent_audit_logs.insert_one(event)
+    return clean(event)
+
+def run_agent_tool(tool_name,args):
+    if tool_name=="list_jobs":
+        return {"ok":True,"jobs":[clean(x) for x in db.jobs.find().sort("updated_at",-1).limit(50)]}
+    if tool_name=="get_job":
+        job=db.jobs.find_one({"job_id":args.get("job_id")})
+        if not job:raise HTTPException(404,"Không tìm thấy vị trí tuyển dụng.")
+        return {"ok":True,"job":clean(job)}
+    if tool_name=="list_candidates":
+        query={}
+        if args.get("job_id"):
+            app_query={"job_id":args["job_id"]}
+            if args.get("tier"):app_query["tier"]=args["tier"]
+            if args.get("min_score") is not None:app_query["match_score"]={"$gte":float(args["min_score"])}
+            apps=list(db.applications.find(app_query).sort("match_score",-1).limit(100))
+            candidate_ids=[x["candidate_id"] for x in apps]
+            candidates={x["candidate_id"]:clean(x) for x in db.candidates.find({"candidate_id":{"$in":candidate_ids}})}
+            return {"ok":True,"applications":[{**clean(x),"candidate":candidates.get(x["candidate_id"])} for x in apps]}
+        return {"ok":True,"candidates":[clean(x) for x in db.candidates.find().sort("created_at",-1).limit(100)]}
+    if tool_name=="get_candidate":
+        candidate=db.candidates.find_one({"candidate_id":args.get("candidate_id")})
+        if not candidate:raise HTTPException(404,"Không tìm thấy ứng viên.")
+        applications=[clean(x) for x in db.applications.find({"candidate_id":candidate["candidate_id"]})]
+        return {"ok":True,"candidate":clean(candidate),"applications":applications}
+    if tool_name=="score_candidate":
+        candidate=db.candidates.find_one({"candidate_id":args.get("candidate_id")});job=db.jobs.find_one({"job_id":args.get("job_id")})
+        if not candidate or not job:raise HTTPException(404,"Không tìm thấy ứng viên hoặc vị trí.")
+        return {"ok":True,"candidate_id":candidate["candidate_id"],"job_id":job["job_id"],**score(candidate,job)}
+    if tool_name=="create_job_criteria":
+        criteria={"department":"Engineering","level":"middle","headcount":1,"description":"","nice_to_have_skills":[],"required_certifications":[],"language":"","language_level":"","min_experience_years":0,"ideal_experience_years":0,"experience_domains":[],"min_education":"high_school","preferred_majors":[],"work_mode":"onsite","location":"","salary_min":0,"salary_max":0,"contract_type":"full_time","desired_start_date":"","weights":{"skills":40,"experience":30,"education":15,"other":15},"thresholds":{"high":80,"review":60},"screening_questions":[]}
+        criteria.update(args);criteria["weights"]={**{"skills":40,"experience":30,"education":15,"other":15},**(args.get("weights") or {})};criteria["thresholds"]={**{"high":80,"review":60},**(args.get("thresholds") or {})}
+        result=save_job(criteria)
+        return {"ok":True,"criteria":result["criteria"]}
+    if tool_name=="update_application_status":
+        application_id=args.get("application_id");status=args.get("status")
+        result=db.applications.update_one({"application_id":application_id},{"$set":{"stage":status,"updated_at":now(),"updated_by":"react_agent"}})
+        if not result.matched_count:raise HTTPException(404,"Không tìm thấy hồ sơ ứng tuyển.")
+        return {"ok":True,"application":clean(db.applications.find_one({"application_id":application_id}))}
+    if tool_name=="send_interview_invite":
+        return interview_actions({"action":"create_invite",**args})
+    if tool_name in ["cancel_interview","reschedule_interview","send_reminder"]:
+        action={"cancel_interview":"cancel","reschedule_interview":"reschedule","send_reminder":"remind"}[tool_name]
+        return interview_actions({"action":action,**args})
+    raise HTTPException(400,f"Tool '{tool_name}' không tồn tại.")
+
+@app.post("/agent-tools")
+def agent_tools(payload:dict):
+    tool_name=str(payload.get("tool_name") or "");args=payload.get("arguments") or {};session_id=payload.get("session_id")
+    sensitive={"create_job_criteria","update_application_status","send_interview_invite","cancel_interview","reschedule_interview","send_reminder"}
+    confirmation_id=payload.get("confirmation_id")
+    if confirmation_id:
+        pending=db.agent_pending_actions.find_one({"confirmation_id":confirmation_id,"status":"pending"})
+        if not pending:raise HTTPException(404,"Yêu cầu xác nhận không tồn tại hoặc đã được xử lý.")
+        if not payload.get("confirmed"):
+            db.agent_pending_actions.update_one({"_id":pending["_id"]},{"$set":{"status":"rejected","resolved_at":now()}})
+            observation={"ok":False,"cancelled":True,"message":"HR đã hủy hành động."};audit_agent(pending["session_id"],pending["tool_name"],pending["arguments"],observation,"rejected")
+            return observation
+        result=run_agent_tool(pending["tool_name"],pending["arguments"])
+        db.agent_pending_actions.update_one({"_id":pending["_id"]},{"$set":{"status":"executed","resolved_at":now()}})
+        audit_agent(pending["session_id"],pending["tool_name"],pending["arguments"],result)
+        return result
+    if tool_name in sensitive:
+        confirmation_id=f"confirm_{uuid.uuid4().hex[:12]}"
+        pending={"confirmation_id":confirmation_id,"session_id":session_id or "anonymous","tool_name":tool_name,"arguments":args,"status":"pending","created_at":now()}
+        db.agent_pending_actions.insert_one(pending)
+        observation={"ok":True,"requires_confirmation":True,"confirmation_id":confirmation_id,"tool_name":tool_name,"arguments":args}
+        audit_agent(session_id,tool_name,args,observation,"awaiting_confirmation")
+        return observation
+    result=run_agent_tool(tool_name,args);audit_agent(session_id,tool_name,args,result)
+    return result
+
+@app.get("/agent-audits")
+def agent_audits(session_id:str=""):
+    query={"session_id":session_id} if session_id else {}
+    return {"ok":True,"logs":[clean(x) for x in db.agent_audit_logs.find(query).sort("created_at",-1).limit(200)]}
 @app.post("/jobs")
 def save_job(payload:dict):
     c=validate_criteria(payload);db.jobs.update_one({"job_id":c["job_id"]},{"$set":c},upsert=True);return {"ok":True,"criteria":clean(db.jobs.find_one({"job_id":c["job_id"]}))}

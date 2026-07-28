@@ -19,7 +19,7 @@ JOBS: dict[str, dict[str, Any]] = {
         "preferred_skills": ["docker", "redis", "aws"],
         "min_years": 2,
         "education": "bachelor",
-        "weights": {"skills": 0.4, "experience": 0.3, "education": 0.15, "other": 0.15},
+        "weights": {"skills": 0.55, "experience": 0.3, "education": 0.15},
     }
 }
 
@@ -52,34 +52,182 @@ INTERVIEW_SLOTS = {
 BOOKINGS: list[dict[str, str]] = []
 
 
-def _error(code: str, message: str) -> dict[str, Any]:
-    return {"ok": False, "error": code, "message": message}
+def _error(code: str, message: str, **details: Any) -> dict[str, Any]:
+    """Tạo kết quả lỗi thống nhất để Agent xử lý mà không làm ứng dụng crash."""
+    return {"ok": False, "error": code, "message": message, **details}
+
+
+def _normalize_id(value: Any, field_name: str) -> tuple[str | None, dict[str, Any] | None]:
+    """Chuẩn hóa mã định danh và trả lỗi nếu đầu vào không phải chuỗi hợp lệ."""
+    if not isinstance(value, str) or not value.strip():
+        return None, _error(
+            "INVALID_INPUT",
+            f"Tham số '{field_name}' phải là chuỗi không rỗng.",
+        )
+    return value.strip().upper(), None
+
+
+def _validate_candidate_data(candidate: dict[str, Any]) -> dict[str, Any] | None:
+    """Kiểm tra cấu trúc CV demo trước khi tool sử dụng dữ liệu."""
+    skills = candidate.get("skills")
+    if (
+        not isinstance(skills, list)
+        or not skills
+        or any(not isinstance(item, str) or not item.strip() for item in skills)
+    ):
+        return _error(
+            "CV_DATA_INVALID",
+            "Trường 'skills' phải là danh sách chuỗi không rỗng.",
+        )
+
+    years = candidate.get("years_experience")
+    if isinstance(years, bool) or not isinstance(years, (int, float)) or years < 0:
+        return _error(
+            "CV_DATA_INVALID",
+            "Trường 'years_experience' phải là số không âm.",
+        )
+
+    education = candidate.get("education")
+    if not isinstance(education, str) or not education.strip():
+        return _error(
+            "CV_DATA_INVALID",
+            "Trường 'education' phải là chuỗi không rỗng.",
+        )
+    return None
+
+
+def _validate_job_data(job: dict[str, Any]) -> dict[str, Any] | None:
+    """Kiểm tra JD và trọng số để tránh lỗi khi chấm điểm."""
+    required = job.get("required_skills")
+    preferred = job.get("preferred_skills")
+    if (
+        not isinstance(required, list)
+        or not required
+        or any(not isinstance(item, str) or not item.strip() for item in required)
+    ):
+        return _error(
+            "JOB_DATA_INVALID",
+            "Trường 'required_skills' phải là danh sách chuỗi không rỗng.",
+        )
+    if not isinstance(preferred, list) or any(
+        not isinstance(item, str) or not item.strip() for item in preferred
+    ):
+        return _error(
+            "JOB_DATA_INVALID",
+            "Trường 'preferred_skills' phải là danh sách chuỗi.",
+        )
+
+    min_years = job.get("min_years")
+    if (
+        isinstance(min_years, bool)
+        or not isinstance(min_years, (int, float))
+        or min_years < 0
+    ):
+        return _error(
+            "JOB_DATA_INVALID",
+            "Trường 'min_years' phải là số không âm.",
+        )
+
+    education = job.get("education")
+    if not isinstance(education, str) or not education.strip():
+        return _error(
+            "JOB_DATA_INVALID",
+            "Trường 'education' phải là chuỗi không rỗng.",
+        )
+
+    weights = job.get("weights")
+    required_weights = {"skills", "experience", "education"}
+    if not isinstance(weights, dict) or not required_weights.issubset(weights):
+        return _error(
+            "JOB_DATA_INVALID",
+            "Trường 'weights' thiếu trọng số skills, experience hoặc education.",
+        )
+    weight_values = [weights[key] for key in required_weights]
+    invalid_weight = any(
+        isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0
+        for value in weight_values
+    )
+    if invalid_weight or abs(sum(weight_values) - 1.0) > 1e-9:
+        return _error(
+            "JOB_DATA_INVALID",
+            "Các trọng số phải là số không âm và có tổng bằng 1.",
+        )
+    return None
 
 
 def get_candidate(candidate_id: str) -> dict[str, Any]:
-    """Lấy hồ sơ đã parse theo ID. Read-only; trả lỗi có cấu trúc nếu không tồn tại."""
-    candidate = CANDIDATES.get(str(candidate_id).upper())
+    """Lấy hồ sơ ẩn danh đã parse theo mã ứng viên.
+
+    Args:
+        candidate_id: Mã ứng viên, ví dụ ``CV-001``.
+
+    Returns:
+        Dict có ``ok=True`` và các trường phục vụ chấm điểm, hoặc lỗi
+        ``INVALID_INPUT``, ``CANDIDATE_NOT_FOUND`` hay ``CV_DATA_INVALID``.
+
+    Side effects:
+        Không có. Tool không trả tên và email của ứng viên.
+    """
+    normalized_id, input_error = _normalize_id(candidate_id, "candidate_id")
+    if input_error:
+        return input_error
+    candidate = CANDIDATES.get(normalized_id)
     if not candidate:
         return _error("CANDIDATE_NOT_FOUND", f"Không tìm thấy ứng viên '{candidate_id}'.")
-    result = deepcopy(candidate)
-    result["ok"] = True
-    return result
+    validation_error = _validate_candidate_data(candidate)
+    if validation_error:
+        return validation_error
+    return {
+        "ok": True,
+        "id": candidate["id"],
+        "skills": deepcopy(candidate["skills"]),
+        "years_experience": candidate["years_experience"],
+        "education": candidate["education"],
+        "status": candidate.get("status", "unknown"),
+        "data_scope": "blind_profile",
+    }
 
 
 def get_job(job_id: str) -> dict[str, Any]:
-    """Lấy JD chuẩn hóa theo ID. Read-only; không quăng exception nghiệp vụ."""
-    job = JOBS.get(str(job_id).upper())
+    """Lấy JD và rubric chấm điểm theo mã vị trí.
+
+    Args:
+        job_id: Mã vị trí, ví dụ ``JOB-001``.
+
+    Returns:
+        Dict có ``ok=True`` và JD chuẩn hóa, hoặc lỗi ``INVALID_INPUT``,
+        ``JOB_NOT_FOUND`` hay ``JOB_DATA_INVALID``.
+
+    Side effects:
+        Không có.
+    """
+    normalized_id, input_error = _normalize_id(job_id, "job_id")
+    if input_error:
+        return input_error
+    job = JOBS.get(normalized_id)
     if not job:
         return _error("JOB_NOT_FOUND", f"Không tìm thấy vị trí '{job_id}'.")
+    validation_error = _validate_job_data(job)
+    if validation_error:
+        return validation_error
     result = deepcopy(job)
     result["ok"] = True
     return result
 
 
 def score_candidate(candidate_id: str, job_id: str) -> dict[str, Any]:
-    """Chấm điểm theo trọng số JD: kỹ năng, kinh nghiệm, học vấn và tiêu chí khác.
+    """Đối chiếu một CV với rubric cố định của vị trí.
 
-    Tool không dùng các thuộc tính nhạy cảm và không tự loại ứng viên.
+    Args:
+        candidate_id: Mã ứng viên cần đánh giá.
+        job_id: Mã vị trí chứa tiêu chí và trọng số.
+
+    Returns:
+        Điểm, breakdown, bằng chứng và trạng thái đề xuất để HR xem xét.
+        Mọi lỗi từ ``get_candidate`` hoặc ``get_job`` được trả nguyên trạng.
+
+    Side effects:
+        Không có. Tool không dùng PII và không tự tuyển hoặc loại ứng viên.
     """
     candidate = get_candidate(candidate_id)
     job = get_job(job_id)
@@ -95,34 +243,52 @@ def score_candidate(candidate_id: str, job_id: str) -> dict[str, Any]:
     preferred_ratio = len(skills & preferred) / max(len(preferred), 1)
     skills_score = round(100 * (0.8 * required_ratio + 0.2 * preferred_ratio), 1)
     experience_score = round(100 * min(candidate["years_experience"] / max(job["min_years"], 1), 1), 1)
-    education_score = 100 if candidate["education"] == job["education"] else 50
-    other_score = 60
+    education_score = (
+        100
+        if candidate["education"].casefold() == job["education"].casefold()
+        else 50
+    )
     weights = job["weights"]
     total = round(
         skills_score * weights["skills"]
         + experience_score * weights["experience"]
-        + education_score * weights["education"]
-        + other_score * weights["other"],
+        + education_score * weights["education"],
         1,
     )
-    if total >= 80:
-        tier, label, next_action = "high", "phù hợp cao", "đưa vào danh sách hẹn phỏng vấn"
-    elif total >= 60:
-        tier, label, next_action = "review", "cần xem xét", "đưa vào hàng chờ HR review"
+    missing_required = sorted(required - skills)
+    if total >= 80 and not missing_required:
+        tier = "high"
+        status = "REVIEW_FOR_SHORTLIST"
+        label = "có bằng chứng phù hợp cao"
+        next_action = "chuyển HR xem xét trước khi hẹn phỏng vấn"
+    elif missing_required:
+        tier = "gaps"
+        status = "REVIEW_GAPS"
+        label = "còn thiếu bằng chứng cho tiêu chí bắt buộc"
+        next_action = "chuyển HR kiểm tra hoặc yêu cầu bổ sung thông tin"
     else:
-        tier, label, next_action = "rejected", "không phù hợp", "tự động loại và chuẩn bị email từ chối"
+        tier = "review"
+        status = "REVIEW_REQUIRED"
+        label = "cần HR xem xét thêm"
+        next_action = "đưa vào hàng chờ HR review"
     return {
-        "ok": True, "candidate_id": candidate_id.upper(), "job_id": job_id.upper(),
-        "score": total, "label": label, "tier": tier, "next_action": next_action,
+        "ok": True,
+        "candidate_id": candidate["id"],
+        "job_id": job["id"],
+        "score": total,
+        "label": label,
+        "tier": tier,
+        "status": status,
+        "next_action": next_action,
+        "requires_hr_review": True,
         "breakdown": {
             "skills_score": skills_score,
             "experience_score": experience_score,
             "education_score": education_score,
-            "other_score": other_score,
         },
         "evidence": {
             "matched_required_skills": sorted(skills & required),
-            "missing_required_skills": sorted(required - skills),
+            "missing_required_skills": missing_required,
             "matched_preferred_skills": sorted(skills & preferred),
             "years_experience": candidate["years_experience"],
             "required_years": job["min_years"],
@@ -132,12 +298,38 @@ def score_candidate(candidate_id: str, job_id: str) -> dict[str, Any]:
 
 
 def rank_candidates(job_id: str) -> dict[str, Any]:
-    """Xếp hạng toàn bộ hồ sơ demo theo điểm gợi ý cho một JD."""
-    if not get_job(job_id).get("ok"):
-        return get_job(job_id)
-    ranking = [score_candidate(candidate_id, job_id) for candidate_id in CANDIDATES]
-    ranking.sort(key=lambda item: item["score"], reverse=True)
-    return {"ok": True, "job_id": job_id.upper(), "ranking": ranking, "requires_hr_review": True}
+    """Xếp hạng hồ sơ hợp lệ và tách riêng các hồ sơ bị lỗi.
+
+    Args:
+        job_id: Mã vị trí dùng chung cho toàn bộ ứng viên.
+
+    Returns:
+        Danh sách ``ranking`` đã sắp xếp ổn định, ``failed_candidates`` và
+        cờ ``requires_hr_review``. Tool không tự động loại ứng viên.
+
+    Side effects:
+        Không có.
+    """
+    job = get_job(job_id)
+    if not job.get("ok"):
+        return job
+
+    ranking: list[dict[str, Any]] = []
+    failed_candidates: list[dict[str, Any]] = []
+    for candidate_id in CANDIDATES:
+        result = score_candidate(candidate_id, job["id"])
+        if result.get("ok"):
+            ranking.append(result)
+        else:
+            failed_candidates.append({"candidate_id": candidate_id, **result})
+    ranking.sort(key=lambda item: (-item["score"], item["candidate_id"]))
+    return {
+        "ok": True,
+        "job_id": job["id"],
+        "ranking": ranking,
+        "failed_candidates": failed_candidates,
+        "requires_hr_review": True,
+    }
 
 
 def find_interview_slots(job_id: str) -> dict[str, Any]:
